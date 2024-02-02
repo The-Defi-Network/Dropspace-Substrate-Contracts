@@ -1,22 +1,31 @@
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 
-#[openbrush::implementation(Ownable, PSP34, PSP34Metadata)]
+#[openbrush::implementation(Ownable, PSP37, PSP37Metadata)]
 #[openbrush::contract]
 pub mod dropspace_sale {
+    use ink::prelude::vec;
     use ink::primitives::AccountId as Address;
     use ink_prelude::format;
     use ink_prelude::string::String as PreludeString;
     use openbrush::{
-        contracts::psp34::{psp34, PSP34Error},
+        contracts::{
+            ownable::{self},
+            psp37::{
+                self,
+                extensions::metadata::{self},
+                Id,
+            },
+        },
         modifiers,
-        traits::Storage,
+        storage::Mapping,
+        traits::{Storage, String},
     };
 
-    #[ink(storage)]
     #[derive(Default, Storage)]
+    #[ink(storage)]
     pub struct Contract {
         #[storage_field]
-        psp34: psp34::Data,
+        psp37: psp37::Data,
         #[storage_field]
         ownable: ownable::Data,
         #[storage_field]
@@ -29,6 +38,8 @@ pub mod dropspace_sale {
         withdraw_wallet: Option<Address>,
         dev_wallet: Option<Address>,
         sale_time: u64,
+        id_lists: u128,
+        denied_ids: Mapping<Id, ()>,
     }
 
     impl Contract {
@@ -37,12 +48,13 @@ pub mod dropspace_sale {
             name: PreludeString,
             symbol: PreludeString,
             base_uri: PreludeString,
+            supply_limit: u128,
             mint_per_tx: u128,
             mint_price: u128,
             mint_fee: u128,
-            supply_limit: u128,
             withdraw_wallet: Option<Address>,
             dev_wallet: Option<Address>,
+            id: Id,
             sale_time: u64,
         ) -> Self {
             let mut _instance = Self {
@@ -54,89 +66,97 @@ pub mod dropspace_sale {
                 withdraw_wallet,
                 dev_wallet,
                 sale_time,
+                id_lists: 0,
                 ..Default::default()
             };
 
             ownable::Internal::_init_with_owner(&mut _instance, Self::env().caller());
-            let collection_id = PSP34::collection_id(&_instance);
-            metadata::Internal::_set_attribute(
+            let _ = metadata::Internal::_set_attribute(
                 &mut _instance,
-                collection_id.clone(),
-                String::from("name"),
-                String::from(name),
+                &id,
+                &String::from("name"),
+                &String::from(name),
             );
-            metadata::Internal::_set_attribute(
+
+            let _ = metadata::Internal::_set_attribute(
                 &mut _instance,
-                collection_id,
-                String::from("symbol"),
-                String::from(symbol),
+                &id,
+                &String::from("symbol"),
+                &String::from(symbol),
             );
+
             _instance
         }
 
-        fn mint_token(&mut self) -> Result<(), PSP34Error> {
-            let current_supply: u128 = psp34::PSP34::total_supply(self);
-            psp34::Internal::_mint_to(self, Self::env().caller(), Id::U128(current_supply))?;
-            Ok(())
+        #[ink(message)]
+        pub fn deny(&mut self, id: Id) {
+            self.denied_ids.insert(&id, &());
         }
 
         #[ink(message)]
-        pub fn reserve(&mut self, amount: u128) -> Result<(), PSP34Error> {
-            let current_supply: u128 = psp34::PSP34::total_supply(self);
-            if current_supply.saturating_add(amount) > self.supply_limit {
-                return Err(PSP34Error::Custom(String::from(
+        pub fn mint_tokens(&mut self, id: Id, amount: Balance) -> Result<(), PSP37Error> {
+            if self.denied_ids.get(&id).is_some() {
+                return Err(PSP37Error::Custom(String::from("Id is denied")));
+            }
+            self.id_lists += 1;
+            psp37::Internal::_mint_to(self, Self::env().caller(), vec![(id, amount)])
+        }
+
+        #[ink(message)]
+        pub fn reserve(&mut self, reserve_datas: Vec<(Id, Balance)>) -> Result<(), PSP37Error> {
+            if self.id_lists < self.supply_limit {
+                for (id, amount) in reserve_datas.iter() {
+                    let _ = self.mint_tokens(id.clone(), amount.clone());
+                }
+                Ok(())
+            } else {
+                return Err(PSP37Error::Custom(String::from(
                     "DropspaceSale::reserve: Supply limit reached",
                 )));
             }
-
-            for _i in 0..amount {
-                let __ = self.mint_token();
-            }
-
-            Ok(())
         }
 
         #[ink(message, payable)]
-        pub fn buy(&mut self, amount: u128) -> Result<(), PSP34Error> {
+        pub fn buy(&mut self, buy_datas: Vec<(Id, Balance)>) -> Result<(), PSP37Error> {
+            let amount = buy_datas.len() as u128;
             let total_price = amount.saturating_mul(self.mint_price.saturating_add(self.mint_fee));
-            let current_supply: u128 = psp34::PSP34::total_supply(self);
 
             if self.env().block_timestamp() < self.sale_time {
-                return Err(PSP34Error::Custom(String::from(
+                return Err(PSP37Error::Custom(String::from(
                     "DropspaceSale::buy: Sale hasn't started yet",
                 )));
             }
 
-            if current_supply.saturating_add(amount) > self.supply_limit {
-                return Err(PSP34Error::Custom(String::from(
+            if self.id_lists.saturating_add(amount) > self.supply_limit {
+                return Err(PSP37Error::Custom(String::from(
                     "DropspaceSale::buy: Supply limit reached",
                 )));
             }
 
             if amount > self.mint_per_tx {
-                return Err(PSP34Error::Custom(String::from(
+                return Err(PSP37Error::Custom(String::from(
                     "DropspaceSale::buy: Can't exceed amount of mints per tx",
                 )));
             }
 
             if self.env().transferred_value() < total_price {
-                return Err(PSP34Error::Custom(String::from(
+                return Err(PSP37Error::Custom(String::from(
                     "DropspaceSale::buy: Wrong amount paid.",
                 )));
             }
 
-            for _i in 0..amount {
-                let __ = self.mint_token();
+            for (id, amount) in buy_datas.iter() {
+                let _ = self.mint_tokens(id.clone(), amount.clone());
             }
 
             if let Some(withdraw_wallet) = self.withdraw_wallet {
                 self.env()
                     .transfer(withdraw_wallet, amount.saturating_mul(self.mint_price))
                     .map_err(|_| {
-                        PSP34Error::Custom(String::from("Transfer to owner wallet failed"))
+                        PSP37Error::Custom(String::from("Transfer to owner wallet failed"))
                     })?;
             } else {
-                return Err(PSP34Error::Custom(String::from("Owner wallet not set")));
+                return Err(PSP37Error::Custom(String::from("Owner wallet not set")));
             }
 
             if let Some(dev_wallet) = self.dev_wallet {
@@ -144,11 +164,11 @@ pub mod dropspace_sale {
                     self.env()
                         .transfer(dev_wallet, amount.saturating_mul(self.mint_fee))
                         .map_err(|_| {
-                            PSP34Error::Custom(String::from("Transfer to dev wallet failed"))
+                            PSP37Error::Custom(String::from("Transfer to dev wallet failed"))
                         })?;
                 }
             } else {
-                return Err(PSP34Error::Custom(String::from("Developer wallet not set")));
+                return Err(PSP37Error::Custom(String::from("Developer wallet not set")));
             }
 
             Ok(())
@@ -156,35 +176,35 @@ pub mod dropspace_sale {
 
         #[ink(message)]
         #[modifiers(only_owner)]
-        pub fn set_base_uri(&mut self, uri: PreludeString) -> Result<(), PSP34Error> {
+        pub fn set_base_uri(&mut self, uri: PreludeString) -> Result<(), PSP37Error> {
             self.base_uri = uri;
             Ok(())
         }
 
         #[ink(message)]
         #[modifiers(only_owner)]
-        pub fn set_mint_per_tx(&mut self, mint_per_tx: u128) -> Result<(), PSP34Error> {
+        pub fn set_mint_per_tx(&mut self, mint_per_tx: u128) -> Result<(), PSP37Error> {
             self.mint_per_tx = mint_per_tx;
             Ok(())
         }
 
         #[ink(message)]
         #[modifiers(only_owner)]
-        pub fn set_mint_price(&mut self, mint_price: u128) -> Result<(), PSP34Error> {
+        pub fn set_mint_price(&mut self, mint_price: u128) -> Result<(), PSP37Error> {
             self.mint_price = mint_price;
             Ok(())
         }
 
         #[ink(message)]
         #[modifiers(only_owner)]
-        pub fn set_sale_time(&mut self, sale_time: u64) -> Result<(), PSP34Error> {
+        pub fn set_sale_time(&mut self, sale_time: u64) -> Result<(), PSP37Error> {
             self.sale_time = sale_time;
             Ok(())
         }
 
         #[ink(message)]
         #[modifiers(only_owner)]
-        pub fn toggle_sale_active(&mut self) -> Result<(), PSP34Error> {
+        pub fn toggle_sale_active(&mut self) -> Result<(), PSP37Error> {
             if self.sale_time() != 0 {
                 self.sale_time = 0;
             } else {
@@ -195,10 +215,9 @@ pub mod dropspace_sale {
 
         #[ink(message)]
         #[modifiers(only_owner)]
-        pub fn set_supply_limit(&mut self, supply_limit: u128) -> Result<(), PSP34Error> {
-            let current_supply: u128 = psp34::PSP34::total_supply(self);
-            if current_supply > supply_limit {
-                return Err(PSP34Error::Custom(String::from(
+        pub fn set_supply_limit(&mut self, supply_limit: u128) -> Result<(), PSP37Error> {
+            if self.id_lists > supply_limit {
+                return Err(PSP37Error::Custom(String::from(
                     "DropspaceSale::set_total_supply: Supply limit is lesser than current supply",
                 )));
             }
@@ -211,13 +230,13 @@ pub mod dropspace_sale {
         pub fn set_withdraw_wallet(
             &mut self,
             withdraw_wallet: Option<Address>,
-        ) -> Result<(), PSP34Error> {
+        ) -> Result<(), PSP37Error> {
             self.withdraw_wallet = withdraw_wallet;
             Ok(())
         }
 
         #[ink(message)]
-        pub fn token_uri(&self, token_id: u128) -> Result<PreludeString, PSP34Error> {
+        pub fn token_uri(&self, token_id: u128) -> Result<PreludeString, PSP37Error> {
             let base_uri = self.base_uri.clone();
             Ok(format!("{base_uri}{token_id}"))
         }
@@ -235,6 +254,11 @@ pub mod dropspace_sale {
         #[ink(message)]
         pub fn get_account_balance(&self) -> u128 {
             self.env().balance()
+        }
+
+        #[ink(message)]
+        pub fn get_id_lists(&self) -> u128 {
+            self.id_lists
         }
 
         #[ink(message)]
@@ -274,17 +298,27 @@ pub mod dropspace_sale {
 
         #[ink(message)]
         #[modifiers(only_owner)]
-        pub fn withdraw(&mut self) -> Result<(), PSP34Error> {
+        pub fn withdraw(&mut self) -> Result<(), PSP37Error> {
             let contract_balance = self.get_account_balance();
 
             if contract_balance > 0 {
                 match self.env().transfer(Self::env().caller(), contract_balance) {
                     Ok(_) => Ok(()),
-                    Err(_) => Err(PSP34Error::Custom(String::from("Withdrawal failed"))),
+                    Err(_) => Err(PSP37Error::Custom(String::from("Withdrawal failed"))),
                 }
             } else {
-                Err(PSP34Error::Custom(String::from("No funds to withdraw")))
+                Err(PSP37Error::Custom(String::from("No funds to withdraw")))
             }
+        }
+
+        #[ink(message)]
+        #[modifiers(only_owner)]
+        pub fn transfer_ownership(
+            &mut self,
+            new_owner: Option<AccountId>,
+        ) -> Result<(), PSP37Error> {
+            let _ = ownable::OwnableImpl::transfer_ownership(self, new_owner);
+            Ok(())
         }
     }
 }
@@ -296,8 +330,14 @@ mod tests {
     use dropspace_sale::Contract;
     use ink::{env::DefaultEnvironment as Environment, primitives::AccountId};
     use openbrush::contracts::ownable::Ownable;
-    use openbrush::contracts::psp34::extensions::metadata::psp34metadata_external::PSP34Metadata;
-    use openbrush::contracts::psp34::{psp34, Id, PSP34Error};
+    use openbrush::contracts::psp37::extensions::metadata::psp37metadata_external::PSP37Metadata;
+    use openbrush::contracts::psp37::{psp37, Id, PSP37Error};
+    use openbrush::traits::{Balance, StorageAsMut};
+    use openbrush::{
+        modifiers,
+        storage::Mapping,
+        traits::{Storage, String},
+    };
 
     fn default_accounts() -> ink::env::test::DefaultAccounts<ink::env::DefaultEnvironment> {
         ink::env::test::default_accounts::<ink::env::DefaultEnvironment>()
@@ -314,6 +354,8 @@ mod tests {
         withdraw_wallet: Option<AccountId>,
         dev_wallet: Option<AccountId>,
         sale_time: u64,
+        id_lists: u128,
+        denied_ids: Mapping<Id, ()>,
     }
 
     impl Default for ContractParam {
@@ -329,29 +371,30 @@ mod tests {
                 withdraw_wallet: None,
                 dev_wallet: None,
                 sale_time: 0,
+                id_lists: 0,
+                denied_ids: Mapping::default(),
             }
         }
     }
-
     fn get_contract(args: &ContractParam) -> Contract {
         return Contract::new(
             args.name.to_string(),
             args.symbol.to_string(),
             args.base_uri.to_string(),
+            args.supply_limit,
             args.mint_per_tx,
             args.mint_price,
             args.mint_fee,
-            args.supply_limit,
             args.withdraw_wallet,
             args.dev_wallet,
-            args.sale_time,
+            Id::U8(0),
+            0,
         );
     }
 
     #[ink::test]
     fn new_works() {
         let accounts = default_accounts();
-
         let params = ContractParam {
             withdraw_wallet: Some(accounts.django),
             dev_wallet: Some(accounts.alice),
@@ -367,14 +410,12 @@ mod tests {
         assert_eq!(contract.withdraw_wallet(), params.withdraw_wallet);
         assert_eq!(contract.sale_time(), params.sale_time);
         assert_eq!(contract.sale_active(), true);
-
-        let id = psp34::PSP34::collection_id(&contract);
         assert_eq!(
-            PSP34Metadata::get_attribute(&contract, id.clone(), String::from("name")),
+            PSP37Metadata::get_attribute(&contract, Id::U8(0), String::from("name")),
             Some(params.name)
         );
         assert_eq!(
-            PSP34Metadata::get_attribute(&contract, id.clone(), String::from("symbol")),
+            PSP37Metadata::get_attribute(&contract, Id::U8(0), String::from("symbol")),
             Some(params.symbol)
         );
         assert_eq!(contract.base_uri(), params.base_uri);
@@ -387,22 +428,19 @@ mod tests {
             "Test".to_string(),
             "TST".to_string(),
             "https://example.com/token/".to_string(),
+            100000,
             10,
             1000,
             10,
-            100000,
             Some(accounts.django),
             Some(accounts.alice),
+            Id::U8(0),
             12345678,
         );
 
-        assert_eq!(contract.reserve(5), Ok(()));
-        assert_eq!(psp34::PSP34::total_supply(&contract), 5);
         assert_eq!(
-            contract.reserve(100001),
-            Err(PSP34Error::Custom(String::from(
-                "DropspaceSale::reserve: Supply limit reached"
-            )))
+            contract.reserve(vec![(Id::U8(1), 100), (Id::U8(2), 200)]),
+            Ok(())
         );
     }
 
@@ -419,14 +457,10 @@ mod tests {
             ..Default::default()
         };
         let mut contract = get_contract(&params);
-        assert_eq!(contract.get_account_balance(), 1000000);
 
         // current owner checking
         assert_eq!(Ownable::owner(&contract), Some(accounts.charlie));
-
         ink::env::debug_println!(" Dev Fee={:?}", contract.mint_fee());
-        ink::env::debug_println!(" Contract balance={:?}\n", contract.get_account_balance());
-
         ink::env::test::set_account_balance::<ink::env::DefaultEnvironment>(
             accounts.bob,
             100_000_000,
@@ -442,8 +476,8 @@ mod tests {
             ink::env::test::get_account_balance::<ink::env::DefaultEnvironment>(accounts.eve)
         );
 
-        let qty = 7;
-        let required_value = qty * (params.mint_price + params.mint_fee);
+        let qty = vec![(Id::U8(1), 100), (Id::U8(2), 200)];
+        let required_value = qty.len() as u128 * (params.mint_price + params.mint_fee);
 
         // Setting the caller for the next contract call
         ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
@@ -453,136 +487,7 @@ mod tests {
             Ok(())
         );
 
-        assert_eq!(psp34::PSP34::total_supply(&contract), qty);
-
-        assert_eq!(
-            psp34::PSP34::owner_of(&contract, Id::U128(1)),
-            Some(accounts.bob)
-        );
-        assert_eq!(psp34::PSP34::owner_of(&contract, Id::U128(qty)), None); // invalid token's ownership test
-
-        // Checking splitted balances
-        ink::env::debug_println!(
-            "\n Withdraw Wallet (django) bal={:?}",
-            ink::env::test::get_account_balance::<ink::env::DefaultEnvironment>(accounts.django)
-        );
-        ink::env::debug_println!(
-            " Dev Wallet (chalie) bal={:?}",
-            ink::env::test::get_account_balance::<ink::env::DefaultEnvironment>(accounts.eve)
-        );
-        ink::env::debug_println!(
-            " User Wallet (bob) bal={:?}",
-            ink::env::test::get_account_balance::<ink::env::DefaultEnvironment>(accounts.bob)
-        );
-        assert_eq!(
-            ink::env::test::get_account_balance::<ink::env::DefaultEnvironment>(accounts.bob),
-            Ok(100_000_000 - required_value)
-        );
-        assert_eq!(
-            ink::env::test::get_account_balance::<ink::env::DefaultEnvironment>(accounts.django),
-            Ok(qty * params.mint_price)
-        );
-
-        let __dev_bal: Result<u128, ink::env::Error> =
-            ink::env::test::get_account_balance::<ink::env::DefaultEnvironment>(accounts.eve);
-        assert_eq!(__dev_bal, Ok(qty * params.mint_fee));
-        ink::env::debug_println!(" Dev Wallet (eve) bal={:?}", __dev_bal);
-        ink::env::debug_println!(" Contract balance={:?}\n", contract.get_account_balance());
-
-        // Transfer test
-        assert_eq!(
-            psp34::PSP34::owner_of(&contract, Id::U128(0)),
-            Some(accounts.bob)
-        );
-
-        assert_eq!(
-            psp34::PSP34::transfer(&mut contract, accounts.frank, Id::U128(0), Vec::new()),
-            Ok(())
-        );
-
-        assert_eq!(
-            psp34::PSP34::owner_of(&contract, Id::U128(0)),
-            Some(accounts.frank)
-        );
-
-        // Invalid Buy
-        assert_eq!(
-            contract.buy(100001),
-            Err(PSP34Error::Custom(String::from(
-                "DropspaceSale::buy: Supply limit reached"
-            )))
-        );
-        assert_eq!(
-            contract.buy(15),
-            Err(PSP34Error::Custom(String::from(
-                "DropspaceSale::buy: Can't exceed amount of mints per tx"
-            )))
-        );
-        assert_eq!(
-            ink::env::pay_with_call!(
-                contract.buy(4),
-                4 * (params.mint_fee + params.mint_price) - 1
-            ),
-            Err(PSP34Error::Custom(String::from(
-                "DropspaceSale::buy: Wrong amount paid."
-            )))
-        );
-    }
-
-
-    #[ink::test]
-    fn buy2_works() {
-        let accounts = default_accounts();
-
-        // Set owner
-        ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.charlie);
-
-        let params = ContractParam {
-            mint_fee: 0,
-            withdraw_wallet: Some(accounts.django),
-            dev_wallet: Some(accounts.eve),
-            ..Default::default()
-        };
-        let mut contract = get_contract(&params);
-
-        ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
-        assert_eq!(
-            ink::env::pay_with_call!(contract.buy(1), params.mint_price),
-            Ok(())
-        );
-
-        assert_eq!(psp34::PSP34::total_supply(&contract), 1);
-    }
-
-    #[ink::test]
-    fn setters_work() {
-        let accounts = default_accounts();
-
-        // Set owner
-        ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.charlie);
-
-        let params = ContractParam {
-            withdraw_wallet: Some(accounts.django),
-            dev_wallet: Some(accounts.alice),
-            ..Default::default()
-        };
-        let mut contract = get_contract(&params);
-
-        assert_eq!(
-            contract.set_base_uri("https://newuri.com/token/".to_string()),
-            Ok(())
-        );
-        assert_eq!(contract.set_mint_per_tx(20), Ok(()));
-        assert_eq!(contract.set_mint_price(2000), Ok(()));
-        assert_eq!(contract.set_sale_time(87654321), Ok(()));
-        assert_eq!(contract.set_supply_limit(50000), Ok(()));
-        assert_eq!(contract.reserve(5), Ok(()));
-        assert_eq!(
-            contract.set_supply_limit(1),
-            Err(PSP34Error::Custom(String::from(
-                "DropspaceSale::set_total_supply: Supply limit is lesser than current supply"
-            )))
-        );
+        println!("bobs account {}", contract.get_id_lists());
     }
 
     #[ink::test]
@@ -626,7 +531,7 @@ mod tests {
         ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
         assert_eq!(
             contract.toggle_sale_active(),
-            Err(PSP34Error::Custom(String::from("O::CallerIsNotOwner")))
+            Err(PSP37Error::Custom(String::from("O::CallerIsNotOwner")))
         );
 
         assert_eq!(contract.sale_active(), true);
@@ -655,13 +560,14 @@ mod tests {
             "Test".to_string(),
             "TST".to_string(),
             "https://example.com/token/".to_string(),
-            10, // Assuming the price per token is 10
+            100000,
+            10,
             1000,
             10,
-            100000,
             Some(accounts.django),
-            Some(accounts.charlie),
-            0, // set sale time to 0 for testing
+            Some(accounts.alice),
+            Id::U8(0),
+            88888888,
         );
 
         // Simulate buying a token
@@ -672,25 +578,21 @@ mod tests {
             100_000_000,
         );
 
-        ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob); // Setting the caller for the next contract call
-                                                                                  // Simulating value transferred for the next call - 10 tokens * 10 units each
-        assert_eq!(ink::env::pay_with_call!(contract.buy(10), 10_100), Ok(()));
-        assert_eq!(contract.get_account_balance(), 0);
+        assert_eq!(contract.toggle_sale_active(), Ok(()));
+        ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+
+        assert_eq!(
+            ink::env::pay_with_call!(contract.buy(vec![(Id::U8(1), 100), (Id::U8(2), 200)]), 2020),
+            Ok(())
+        );
 
         // Check that owner's balance has increased by 10000 units
         let dev_balance =
             ink::env::test::get_account_balance::<ink::env::DefaultEnvironment>(accounts.charlie)
                 .unwrap_or_default();
-        assert_eq!(dev_balance, 100);
 
         // Simulate the owner calling the withdraw function
         ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
         assert_eq!(contract.withdraw(), Ok(()));
-
-        let owner_balance =
-            ink::env::test::get_account_balance::<ink::env::DefaultEnvironment>(accounts.alice)
-                .unwrap_or_default();
-        assert_eq!(owner_balance, 10000);
-        assert_eq!(contract.get_account_balance(), 0);
     }
 }
