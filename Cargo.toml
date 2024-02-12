@@ -2,7 +2,7 @@
 name = "dropspace_sale"
 version = "0.1.0"
 edition = "2021"
-authors = ["Mihir Wadekar"]
+authors = ["Mike Gold"]
 
 [dependencies]
 
@@ -12,7 +12,7 @@ scale = { package = "parity-scale-codec", version = "3", default-features = fals
 scale-info = { version = "2.6", default-features = false, features = ["derive"], optional = true }
 
 # Include brush as a dependency and enable default implementation for PSP22 via brush feature
-openbrush = { tag = "4.0.0", git = "https://github.com/Brushfam/openbrush-contracts", default-features = false, features = ["psp34", "ownable"] }
+openbrush = { tag = "4.0.0", git = "https://github.com/Brushfam/openbrush-contracts", default-features = false, features = ["psp3", "ownable"] }
 
 [lib]
 name = "dropspace_sale"
@@ -27,4 +27,7 @@ std = [
     "scale-info/std",
     "openbrush/std",
 ]
+
+psp37 = ["openbrush_contracts/psp37"]
+
 ink-as-dependency = [] 
