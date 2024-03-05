@@ -9,16 +9,16 @@ pub mod dropspace_sale {
     use ink_prelude::string::String as PreludeString;
     use openbrush::{
         contracts::{
-            ownable::{self},
+            ownable,
             psp37::{
                 self,
-                extensions::metadata::{self},
+                extensions::metadata,
                 Id,
             },
         },
         modifiers,
         storage::Mapping,
-        traits::{Storage, String},
+        traits::{Balance, Storage, String},
     };
 
     #[derive(Default, Storage)]
@@ -103,7 +103,7 @@ pub mod dropspace_sale {
         }
 
         #[ink(message, payable)]
-        pub fn buy(&mut self, amount: Balance>) -> Result<(), PSP37Error> {
+        pub fn buy(&mut self, amount: Balance) -> Result<(), PSP37Error> {
             
             let total_price = amount.saturating_mul(self.mint_price.saturating_add(self.mint_fee));
             let current_supply: u128 = psp37::PSP37::total_supply(self, Id::U128(1));
