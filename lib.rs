@@ -18,7 +18,8 @@ pub mod dropspace_sale {
         },
         modifiers,
         storage::Mapping,
-        traits::{Balance, Storage, String},
+        //updated code Balance define
+        traits::{Balance as OtherBalance, Storage, String},
     };
 
     #[derive(Default, Storage)]
@@ -38,6 +39,8 @@ pub mod dropspace_sale {
         withdraw_wallet: Option<Address>,
         dev_wallet: Option<Address>,
         sale_time: u64,
+        //added code
+        supply_limit: u128, 
     }
 
     impl Contract {
@@ -64,6 +67,10 @@ pub mod dropspace_sale {
                 withdraw_wallet,
                 dev_wallet,
                 sale_time,
+                psp37: Default::default(), // Initialize psp37 field
+                denied_ids: Default::default(), // Initialize denied_ids field
+                ownable: Default::default(), // Initialize ownable field
+                metadata: Default::default(), // Initialize metadata field
             };
 
             ownable::Internal::_init_with_owner(&mut _instance, Self::env().caller());
@@ -86,13 +93,13 @@ pub mod dropspace_sale {
 
         #[ink(message)]
         pub fn mint_token(&mut self) -> Result<(), PSP37Error> {
-            let current_supply: u128 = psp37::PSP37::total_supply(self, Id::U128(1));
+            let current_supply: u128 = psp37::PSP37::total_supply(self, Some(Id::U128(1)));
             if current_supply > self.supply_limit {
                 return Err(PSP37Error::Custom(String::from(
                     "DropspaceSale::mint: Supply limit reached",
                 )));
             }
-            psp37::Internal::_mint_to(self, Self::env().caller(), Id::U128(1))?;
+            psp37::Internal::_mint_to(self, Self::env().caller(), vec![(Id::U128(1), 1)])?;
             Ok(())
         }
 
@@ -106,7 +113,7 @@ pub mod dropspace_sale {
         pub fn buy(&mut self, amount: Balance) -> Result<(), PSP37Error> {
             
             let total_price = amount.saturating_mul(self.mint_price.saturating_add(self.mint_fee));
-            let current_supply: u128 = psp37::PSP37::total_supply(self, Id::U128(1));
+            let current_supply: u128 = psp37::PSP37::total_supply(self, Some(Id::U128(1)));
 
             if self.env().block_timestamp() < self.sale_time {
                 return Err(PSP37Error::Custom(String::from(
@@ -201,7 +208,8 @@ pub mod dropspace_sale {
         #[ink(message)]
         #[modifiers(only_owner)]
         pub fn set_supply_limit(&mut self, supply_limit: u128) -> Result<(), PSP37Error> {
-            if self.id_lists > supply_limit {
+            let current_supply: u128 = psp37::PSP37::total_supply(self, Some(Id::U128(1)));
+            if current_supply > supply_limit {
                 return Err(PSP37Error::Custom(String::from(
                     "DropspaceSale::set_total_supply: Supply limit is lesser than current supply",
                 )));
