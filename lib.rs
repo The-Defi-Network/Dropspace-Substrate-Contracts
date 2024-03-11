@@ -19,7 +19,7 @@ pub mod dropspace_sale {
         modifiers,
         storage::Mapping,
         //updated code Balance define
-        traits::{Balance as OtherBalance, Storage, String},
+        traits::{Storage, String},
     };
 
     #[derive(Default, Storage)]
