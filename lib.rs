@@ -103,6 +103,7 @@ pub mod dropspace_sale {
         }
 
         #[ink(message)]
+        #[modifiers(only_owner)]
         pub fn reserve(&mut self, amount: u128) -> Result<(), PSP37Error> {
             let __ = self.mint_token(amount)?;
             Ok(())
@@ -315,8 +316,6 @@ pub mod dropspace_sale {
 
 #[cfg(test)]
 mod tests {
-    use core::i128::MAX;
-
     #[rustfmt::skip]
     use super::*;
     use dropspace_sale::Contract;
@@ -375,7 +374,6 @@ mod tests {
             args.mint_fee,
             args.withdraw_wallet,
             args.dev_wallet,
-            Id::U128(1),
             args.sale_time
         );
     }
@@ -383,11 +381,13 @@ mod tests {
     #[ink::test]
     fn new_works() {
         let accounts = default_accounts();
+
         let params = ContractParam {
             withdraw_wallet: Some(accounts.django),
             dev_wallet: Some(accounts.alice),
             ..Default::default()
         };
+
         let contract = get_contract(&params);
 
         assert_eq!(contract.supply_limit(), params.supply_limit);
@@ -399,49 +399,41 @@ mod tests {
         assert_eq!(contract.sale_time(), params.sale_time);
         assert_eq!(contract.sale_active(), true);
         assert_eq!(
-            PSP37Metadata::get_attribute(&contract, Id::U8(0), String::from("name")),
+            PSP37Metadata::get_attribute(&contract, Id::U128(1), String::from("name")),
             Some(params.name)
         );
         assert_eq!(
-            PSP37Metadata::get_attribute(&contract, Id::U8(0), String::from("symbol")),
+            PSP37Metadata::get_attribute(&contract, Id::U128(1), String::from("symbol")),
             Some(params.symbol)
         );
         assert_eq!(contract.base_uri(), params.base_uri);
     }
 
     #[ink::test]
-    fn mint_token_works() {
-        let accounts = default_accounts();
-        let mut contract = get_contract(&ContractParam::default());
-
-        // Minting token should succeed
-        assert_eq!(contract.mint_token(), Ok(()));
-    }
-
-    #[ink::test]
     fn buy_works() {
         let accounts = default_accounts();
-        let mut contract = get_contract(&ContractParam::default());
+        let params = ContractParam {
+            withdraw_wallet: Some(accounts.django),
+            dev_wallet: Some(accounts.alice),
+            ..Default::default()
+        };
+        let mut contract = get_contract(&params);
 
         // Buying a token should succeed
-        assert_eq!(contract.buy(1), Ok(()));
+        // assert_eq!(contract.buy(1), Ok(()));
+        assert_eq!(ink::env::pay_with_call!(contract.buy(1), (params.mint_price + params.mint_fee) * 1), Ok(()));
+        assert_eq!(
+            ink::env::pay_with_call!(contract.buy(1), (params.mint_price + params.mint_fee - 1) * 1), 
+            Err(PSP37Error::Custom(String::from(
+            "DropspaceSale::buy: Wrong amount paid.",
+            )))
+        );
     }
 
     #[ink::test]
     fn reserve_works() {
         let accounts = default_accounts();
-        /* let mut contract = Contract::new(
-            "Test".to_string(),
-            "TST".to_string(),
-            "https://example.com/token/".to_string(),
-            100000,
-            10,
-            1000,
-            10,
-            Some(accounts.django),
-            Some(accounts.alice),
-        ); */
-
+        
         let params = ContractParam {
             withdraw_wallet: Some(accounts.django),
             dev_wallet: Some(accounts.alice),
@@ -451,7 +443,7 @@ mod tests {
         let mut contract = get_contract(&params);
 
         // Reserving token should succeed
-        assert_eq!(contract.reserve(), Ok(()));
+        assert_eq!(contract.reserve(2), Ok(()));
     }
 
     #[ink::test]
@@ -520,20 +512,7 @@ mod tests {
     #[ink::test]
     fn withdraw_works() {
         let accounts = default_accounts();
-        /* let mut contract = Contract::new(
-            "Test".to_string(),
-            "TST".to_string(),
-            "https://example.com/token/".to_string(),
-            100000,
-            10,
-            1000,
-            10,
-            Some(accounts.django),
-            Some(accounts.alice),
-            1,
-            u64::MAX,
-        ); */
-
+        
         let params = ContractParam {
             withdraw_wallet: Some(accounts.django),
             dev_wallet: Some(accounts.alice),
@@ -543,8 +522,8 @@ mod tests {
         let mut contract = get_contract(&params);
 
         // Simulate buying a token
+        ink::env::test::set_account_balance::<ink::env::DefaultEnvironment>(accounts.django, 0);
         ink::env::test::set_account_balance::<ink::env::DefaultEnvironment>(accounts.alice, 0);
-        ink::env::test::set_account_balance::<ink::env::DefaultEnvironment>(accounts.charlie, 0);
         ink::env::test::set_account_balance::<ink::env::DefaultEnvironment>(
             accounts.bob,
             100_000_000,
@@ -555,14 +534,19 @@ mod tests {
 
         assert_eq!(
             // ink::env::pay_with_call!(contract.buy(vec![(Id::U8(1), 100), (Id::U8(2), 200)]), 2020),
-            ink::env::pay_with_call!(contract.buy(100), 1000 * 100),
+            ink::env::pay_with_call!(contract.buy(100), (params.mint_fee + params.mint_price) * 100),
             Ok(())
         );
 
         // Check that owner's balance has increased by 10000 units
-        let dev_balance =
-            ink::env::test::get_account_balance::<ink::env::DefaultEnvironment>(accounts.charlie)
+        let withdraw_wallet_balance: u128 =
+            ink::env::test::get_account_balance::<ink::env::DefaultEnvironment>(params.withdraw_wallet.unwrap())
                 .unwrap_or_default();
+
+        assert_eq!(
+            withdraw_wallet_balance,
+            params.mint_price * 100,
+        );
 
         // Simulate the owner calling the withdraw function
         ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
